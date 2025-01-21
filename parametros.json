@@ -1,0 +1,16 @@
+{
+    "archivos": [
+        {
+            "archivo": "dmsp-f16_ssjs_precipitating-electrons-ions_20141231000000_20141231235959_cdaweb.cdf",
+            "rango_datos": [79250, 79500],
+            "espectro_datos": 79390,
+            "bandas_energeticas": 6
+        },
+        {
+            "archivo": "dmsp-f16_ssjs_precipitating-electrons-ions_20130531000000_20130531230000_cdaweb.cdf",
+            "rango_datos": [79300, 79650],
+            "espectro_datos": 79400,
+            "bandas_energeticas": 6
+        }
+    ]
+}
