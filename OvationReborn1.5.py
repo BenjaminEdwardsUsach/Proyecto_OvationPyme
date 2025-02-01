@@ -3,44 +3,49 @@ import cdflib
 import numpy as np
 import matplotlib.pyplot as plt
 import json
+
 #%%
 def cargar_datos(ruta_archivo):
-    """Carga las variables necesarias desde un archivo CDF y aplica filtros de rango basados en VALIDMIN y VALIDMAX."""
+    """Loads the necessary variables from a CDF file and applies VALIDMIN/VALIDMAX filters."""
     try:
         cdf = cdflib.CDF(ruta_archivo)
         datos = {}
         for variable in cdf.cdf_info().zVariables:
             attrs = cdf.varattsget(variable)
+            raw_data = cdf.varget(variable)
             if 'VALIDMIN' in attrs and 'VALIDMAX' in attrs:
                 valid_min = attrs['VALIDMIN']
                 valid_max = attrs['VALIDMAX']
-                raw_data = cdf.varget(variable)
                 datos[variable] = np.where((raw_data >= valid_min) & (raw_data <= valid_max), raw_data, np.nan)
             else:
-                datos[variable] = cdf.varget(variable)
+                datos[variable] = raw_data
         return datos
     except Exception as e:
-        print(f"Error al cargar datos: {e}")
+        print(f"Error loading data: {e}")
         return None
 
 def calcular_b2e(latitudes, energias):
-    """Calcula el borde 2be basado en el gradiente de la energía promedio."""
+    """Calculates the b2e boundary based on the gradient of the average energy."""
+    print("Max energy:", max(energias), "Number of latitudes:", len(latitudes))
     gradiente = np.gradient(energias, latitudes)
     for i in range(len(gradiente)):
         if gradiente[i] <= 0:
-            print(latitudes[i], i)
             return latitudes[i], i
     return None, None
 
 def calcular_b2i(latitudes, flujo_total):
-    """Calcula el borde 2bi como la latitud donde el flujo total es máximo."""
+    """Calculates the b2i boundary as the latitude where the total flux is maximum."""
     max_indice = np.argmax(flujo_total)
     return latitudes[max_indice], max_indice
 
 def calcular_b3a_b3b(latitudes, flujos):
-    """Calcula los bordes 3a y 3b en función de los picos monoenergéticos."""
+    """
+    Calculates the b3a and b3b boundaries based on monoenergetic peaks.
+    b3a is the most equatorward and b3b the most poleward occurrence.
+    """
     b3a_lat, b3a_ind, b3b_lat, b3b_ind = None, None, None, None
     for i in range(len(flujos)):
+        # Check if the maximum in this spectrum is significantly larger than the mean (factor 5)
         if np.max(flujos[i]) > 5 * np.mean(flujos[i]):
             if b3a_lat is None:
                 b3a_lat, b3a_ind = latitudes[i], i
@@ -48,70 +53,78 @@ def calcular_b3a_b3b(latitudes, flujos):
     return b3a_lat, b3a_ind, b3b_lat, b3b_ind
 
 def calcular_b4s(latitudes, flujos):
-    """Calcula el borde b4s basado en la correlación promedio."""
-    r_promedios = [np.mean([np.corrcoef(flujos[i], flujos[j])[0, 1] for j in range(i-5, i)]) for i in range(5, len(flujos))]
+    """Calculates the b4s boundary based on the average correlation of each spectrum with its 5 predecessors."""
+    r_promedios = []
+    for i in range(5, len(flujos)):
+        corr_vals = []
+        for j in range(i-5, i):
+            try:
+                corr = np.corrcoef(flujos[i], flujos[j])[0, 1]
+            except Exception:
+                corr = np.nan
+            corr_vals.append(corr)
+        r_promedios.append(np.nanmean(corr_vals))
+    r_promedios = np.array(r_promedios)
+    # Look for a 7-point window where the average correlation drops below 0.60.
     for i in range(len(r_promedios) - 6):
-        if np.mean(r_promedios[i:i+7]) < 4.0:
+        if np.mean(r_promedios[i:i+7]) < 0.60:
             for j in range(i+6, i-1, -1):
                 if r_promedios[j] > 0.60:
                     return latitudes[j + 5], j + 5
     return None, None
 
-def calcular_b5e_b5i(tiempo, flujo, tipo):
-    """Calcula los bordes b5e o b5i basado en el descenso del flujo precipitado."""
-    b5_tiempo, b5_indice = None, None
-    ventana = 12  # Número de datos para promediar antes y después
-    factor_descenso = 4 # Factor de descenso para detectar el borde
-    
-    for i in range(ventana, len(flujo) - ventana):
-        promedio_anterior = np.mean(flujo[i - ventana:i])
-        promedio_siguiente = np.mean(flujo[i:i + ventana])
-        
-        if promedio_anterior > factor_descenso * promedio_siguiente:
-            if tipo == 'electron':
-                verificacion = np.mean(flujo[i:i + 35])
-                umbral = 10 ** 10.5
-            else:
-                verificacion = np.mean(flujo[i:i + 30])
-                umbral = 10 ** 9.7
-            
-            if verificacion < umbral:
-                b5_tiempo, b5_indice = tiempo[i], i
-                break
-    
-    return b5_tiempo, b5_indice
+def detectar_b5_electrons(latitudes, flux, window=12):
+    """
+    Detects the b5 boundary for electrons as the point where the moving average of the flux
+    (over 'window' points) drops by a factor of 4.
+    """
+    if flux.ndim == 1:
+        avg_flux = flux
+    else:
+        avg_flux = np.nanmean(flux, axis=1)
+    ma_flux = np.convolve(avg_flux, np.ones(window)/window, mode='valid')
+    for i in range(len(ma_flux)-1):
+        if ma_flux[i] > 0 and (ma_flux[i] / ma_flux[i+1] >= 4):
+            idx = i + window//2  # approximate index
+            return latitudes[idx], idx
+    return None, None
 
 def graficar_borde(latitudes, valores, borde, titulo, ylabel):
-    """Genera un gráfico con el borde detectado."""
+    """
+    Plots a graph with the detected boundary.
+    If the boundary value is None, it will not attempt to plot a vertical line.
+    """
     plt.figure(figsize=(12, 6))
     plt.plot(latitudes, valores, label=ylabel)
-    if titulo == {'2be'}:
-        plt.axvline(borde, color='r', linestyle='--', label=f'b2e = {borde:.2f}°')
-    elif titulo == {'2bi'}:
-        plt.axvline(borde, color='r', linestyle='--', label=f'b2i = {borde:.2f}°')
-    elif titulo == {'b3a'} or titulo == {'b3b'}:
-        plt.axvline(borde, color='r', linestyle='--', label=f'b3a = {borde:.2f}°')
-    plt.xlabel('Latitud Magnética (°)')
+    
+    if isinstance(borde, (list, tuple)):
+        # For cases with multiple boundaries (e.g., b3a and b3b)
+        for lim in borde:
+            if lim is not None:
+                plt.axvline(lim, color='r', linestyle='--', label=f'{titulo} = {lim:.2f}°')
+    else:
+        if borde is not None:
+            plt.axvline(borde, color='r', linestyle='--', label=f'{titulo} = {borde:.2f}°')
+    
+    plt.xlabel('Magnetic Latitude (°)')
     plt.ylabel(ylabel)
     plt.title(titulo)
     plt.legend()
     plt.grid()
     plt.show()
 
-
-
 def analizar_archivo(filename, rango, espectro, bandas, particula, borde_tipo):
     """
-    Proceso principal para analizar los datos y calcular bordes.
+    Main process for analyzing data and calculating boundaries.
     
-    Parámetros:
+    Parameters:
     -----------
-    filename: Nombre del archivo CDF a analizar.
-    rango: Rango de datos a utilizar.
-    espectro: Espectro de energía a utilizar.
-    bandas: Número de bandas energéticas a considerar.
-    particula: Partícula a analizar (electrones o iones).
-    borde_tipo: Tipo de borde a calcular.
+    filename: Name of the CDF file to analyze.
+    rango: Data range to use.
+    espectro: Energy spectrum index to use.
+    bandas: Number of energy bands to consider.
+    particula: Particle to analyze ('electrons' or 'ions').
+    borde_tipo: Type of boundary to calculate.
     """
     datos = cargar_datos(filename)
     if datos is None:
@@ -119,44 +132,47 @@ def analizar_archivo(filename, rango, espectro, bandas, particula, borde_tipo):
     
     tiempo = datos['Epoch'][rango[0]:rango[1]]
     latitudes = datos['SC_GEOCENTRIC_LAT'][rango[0]:rango[1]]
-    energias=datos['ELE_AVG_ENERGY' if particula == "electrons" else 'ION_AVG_ENERGY']
-    flujos = datos['ELE_DIFF_ENERGY_FLUX' if particula == "electrons" else 'ION_DIFF_ENERGY_FLUX'][rango[0]:rango[1]]
-    print(len(flujos), len(latitudes))
-    flujo_diferencial = datos['ELE_DIFF_ENERGY_FLUX' if particula == "electrons" else 'ION_DIFF_ENERGY_FLUX'][rango[0]:rango[1]]
+    if particula == "electrons":
+        energias = datos['ELE_AVG_ENERGY'][rango[0]:rango[1]]
+        flujos = datos['ELE_DIFF_ENERGY_FLUX'][rango[0]:rango[1]]
+    else:
+        energias = datos['ION_AVG_ENERGY'][rango[0]:rango[1]]
+        flujos = datos['ION_DIFF_ENERGY_FLUX'][rango[0]:rango[1]]
+        
+    flujo_diferencial = flujos 
     flujo_total = np.sum(flujo_diferencial[:, :bandas], axis=1)
     borde = None
     
     if borde_tipo == "2be":
-        print(len(energias), len(latitudes))
         borde, _ = calcular_b2e(latitudes, energias)
-        graficar_borde(latitudes, energias, borde, {borde_tipo}, "Flujo Total de Energía")
+        graficar_borde(latitudes, energias, borde, borde_tipo, "Average Energy")
     elif borde_tipo == "2bi":
         borde, _ = calcular_b2i(latitudes, flujo_total)
-        graficar_borde(latitudes, flujo_total, borde, {borde_tipo}, "Flujo Total de Energía")
-    elif borde_tipo == "b3a" or borde_tipo == "b3b":
+        graficar_borde(latitudes, flujo_total, borde, borde_tipo, "Total Energy Flux")
+    elif borde_tipo in ["b3a", "b3b"]:
         b3a, _, b3b, _ = calcular_b3a_b3b(latitudes, flujos)
-        borde = b3a if borde_tipo == "3a" else b3b
-        print(borde)
-        graficar_borde(latitudes, np.max(flujos, axis=1), borde, {borde_tipo}, "Flujo Máximo")
+        if borde_tipo == "b3a":
+            borde = b3a
+        else:
+            borde = b3b
+        graficar_borde(latitudes, np.max(flujos, axis=1), borde, borde_tipo, "Maximum Flux")
     elif borde_tipo == "b4s":
         borde, _ = calcular_b4s(latitudes, flujo_diferencial)
-        graficar_borde(latitudes, np.mean(flujo_diferencial, axis=1), borde, {borde_tipo}, "Flujo Promedio")
-    elif borde_tipo == "b5e":
-        borde, _ = calcular_b5e_b5i(tiempo, flujo_total, 'electron')
-        graficar_borde(latitudes, np.mean(flujo_diferencial, axis=1), borde, {borde_tipo}, "Flujo Promedio")
-    elif borde_tipo == "b5i":
-        borde, _ = calcular_b5e_b5i(tiempo, flujo_total, 'ion')
-        graficar_borde(latitudes, np.mean(flujo_diferencial, axis=1), borde, {borde_tipo}, "Flujo Promedio")
-
+        graficar_borde(latitudes, np.mean(flujo_diferencial, axis=1), borde, borde_tipo, "Average Flux")
+    elif borde_tipo == "b5":
+        borde, _ = detectar_b5_electrons(latitudes, flujo_total)
+        graficar_borde(latitudes, np.mean(flujo_diferencial, axis=1), borde, borde_tipo, "Average Flux")
+    else:
+        print(f"Boundary type '{borde_tipo}' not implemented.")
     
-    print(f"Borde {borde_tipo} encontrado en latitud: {borde}")
+    print(f"Boundary {borde_tipo} found at latitude: {borde}")
 
-# Leer configuración desde parametros.json
+# Read configuration from parametros.json
 with open('parametros.json', 'r') as file:
     data = json.load(file)
 
 for archivo in data['archivos']:
-    print(f"Procesando archivo: {archivo['archivo']}")
+    print(f"Processing file: {archivo['archivo']}")
     analizar_archivo(
         archivo["archivo"],
         archivo["rango_datos"],
